@@ -1,169 +1,170 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import yfinance as yf
 
 st.set_page_config(page_title="ETF Dashboard", layout="wide")
 
-st.title("📊 ETF Scoring Dashboard (Advanced)")
+st.title("📊 ETF Scoring Dashboard (Clean Dataset Edition)")
 
-# -----------------------------
-# 🔌 DATA INGESTION (Yahoo Finance)
-# -----------------------------
+# ============================================================
+# 📁 DATA SOURCE (JUSTETF-STYLE CSV)
+# ============================================================
+# You maintain a clean CSV instead of relying on broken APIs
+# Example file: etf_data.csv
+#
+# Required columns:
+# ticker,expense_ratio,tracking_diff,avg_volume,spread,aum,
+# is_physical,is_accumulating,issuer,benchmark,top10_weight,is_thematic
+#
+# Optional:
+# rel_1y,rel_3y (can also be precomputed offline)
 
-def load_data(tickers):
-    data = []
-    for t in tickers:
-        try:
-            etf = yf.Ticker(t)
-            info = etf.info
+@st.cache_data
 
-            data.append({
-                'ticker': t,
-                'expense_ratio': info.get('annualReportExpenseRatio', 0.002),
-                'avg_volume': info.get('averageVolume', 0),
-                'aum': info.get('totalAssets', 0),
-                'spread': 0.001,  # placeholder
-                'tracking_diff': 0,  # placeholder
-                'is_physical': 1,
-                'is_accumulating': 1 if 'Acc' in t else 0,
-                'issuer_score': issuer_score(t),
-                'price': info.get('regularMarketPrice', 0)
-            })
-        except:
-            continue
+def load_csv(path="etf_data.csv"):
+    df = pd.read_csv(path)
 
-    return pd.DataFrame(data)
+    # --- Standardise ---
+    df.columns = df.columns.str.lower()
 
-# -----------------------------
-# 🏢 ISSUER SCORING
-# -----------------------------
+    # --- Required columns ---
+    required = [
+        'ticker','expense_ratio','tracking_diff','avg_volume','spread','aum',
+        'is_physical','is_accumulating','issuer','benchmark'
+    ]
 
-def issuer_score(ticker):
-    if any(x in ticker for x in ['VUSA','CSPX','VWRL']):
-        return 1.0
-    elif any(x in ticker for x in ['i','I','SPDR']):
-        return 0.9
-    return 0.7
+    for col in required:
+        if col not in df.columns:
+            df[col] = np.nan
 
-# -----------------------------
-# 📈 BENCHMARK MATCHING
-# -----------------------------
-
-benchmark_map = {
-    'VUSA': '^GSPC',
-    'CSPX': '^GSPC',
-    'EQQQ': '^IXIC',
-    'IUIT': '^IXIC',
-    'INRG': 'ICLN'
-}
-
-
-def add_relative_performance(df):
-    rel_1y = []
-    rel_3y = []
-
-    for _, row in df.iterrows():
-        ticker = row['ticker']
-        bench = benchmark_map.get(ticker, '^GSPC')
-
-        try:
-            etf_hist = yf.Ticker(ticker).history(period="3y")['Close']
-            bench_hist = yf.Ticker(bench).history(period="3y")['Close']
-
-            etf_ret_1y = etf_hist.pct_change(252).iloc[-1]
-            bench_ret_1y = bench_hist.pct_change(252).iloc[-1]
-
-            etf_ret_3y = etf_hist.iloc[-1] / etf_hist.iloc[0] - 1
-            bench_ret_3y = bench_hist.iloc[-1] / bench_hist.iloc[0] - 1
-
-            rel_1y.append(etf_ret_1y - bench_ret_1y)
-            rel_3y.append(etf_ret_3y - bench_ret_3y)
-
-        except:
-            rel_1y.append(0)
-            rel_3y.append(0)
-
-    df['rel_1y'] = rel_1y
-    df['rel_3y'] = rel_3y
+    # Fill sensible defaults
+    df['expense_ratio'] = df['expense_ratio'].fillna(0.002)
+    df['tracking_diff'] = df['tracking_diff'].fillna(0)
+    df['avg_volume'] = df['avg_volume'].fillna(0)
+    df['spread'] = df['spread'].fillna(0.001)
+    df['aum'] = df['aum'].fillna(0)
+    df['is_physical'] = df['is_physical'].fillna(1)
+    df['is_accumulating'] = df['is_accumulating'].fillna(1)
+    df['top10_weight'] = df.get('top10_weight', 0.30)
+    df['is_thematic'] = df.get('is_thematic', 0)
 
     return df
 
-# -----------------------------
-# 🔁 OVERLAP CHECKER (simplified)
-# -----------------------------
+# ============================================================
+# 🏢 ISSUER SCORING (CLEAN)
+# ============================================================
+
+def issuer_score_map(issuer):
+    issuer = str(issuer).lower()
+
+    if any(x in issuer for x in ['vanguard']):
+        return 1.0
+    if any(x in issuer for x in ['ishares','blackrock']):
+        return 1.0
+    if any(x in issuer for x in ['spdr','state street']):
+        return 0.95
+    if any(x in issuer for x in ['invesco','amundi','xtrackers']):
+        return 0.9
+
+    return 0.75
+
+# ============================================================
+# 📈 BENCHMARK RELATIVE PERFORMANCE (OPTIONAL)
+# ============================================================
+# Ideally precomputed externally. If missing, neutral.
+
+
+def ensure_relative_cols(df):
+    if 'rel_1y' not in df.columns:
+        df['rel_1y'] = 0
+    if 'rel_3y' not in df.columns:
+        df['rel_3y'] = 0
+    return df
+
+# ============================================================
+# 🔁 OVERLAP CHECKER (BETTER VERSION)
+# ============================================================
+# Uses benchmark grouping as proxy (cleaner than Yahoo version)
+
 
 def calculate_overlap(df):
-    # Placeholder: assumes ETFs tracking same benchmark overlap heavily
-    overlap_scores = []
+    counts = df['benchmark'].value_counts()
 
-    for _, row in df.iterrows():
-        ticker = row['ticker']
-        bench = benchmark_map.get(ticker, '')
+    df['overlap_score'] = df['benchmark'].map(counts) / counts.max()
+    df['overlap_score'] = df['overlap_score'].clip(0, 1)
 
-        overlap = sum(1 for b in benchmark_map.values() if b == bench)
-        overlap_scores.append(min(overlap / 5, 1))
-
-    df['overlap_score'] = overlap_scores
     return df
 
-# -----------------------------
+# ============================================================
 # 🧠 SCORING MODEL
-# -----------------------------
+# ============================================================
 
 def score_etf(df):
     s = pd.Series(0.0, index=df.index)
 
+    issuer_scores = df['issuer'].apply(issuer_score_map)
+
+    # --- COST ---
     s += np.clip((0.30 - df['expense_ratio']) / 0.30, 0, 1) * 6
     s += np.clip((0.02 - abs(df['tracking_diff'])) / 0.02, 0, 1) * 4
 
+    # --- LIQUIDITY ---
     s += np.clip(np.log10(df['avg_volume'] + 1) / 7, 0, 1) * 3
     s += np.clip((0.005 - df['spread']) / 0.005, 0, 1) * 3
 
+    # --- SIZE ---
     s += np.clip(np.log10(df['aum'] + 1) / 10, 0, 1) * 4
 
+    # --- STRUCTURE ---
     s += df['is_physical'] * 2
     s += df['is_accumulating'] * 1
-    s += df['issuer_score'] * 2
+    s += issuer_scores * 2
 
+    # --- PERFORMANCE ---
     s += np.clip(df['rel_1y'] / 0.10, -1, 1) * 2
     s += np.clip(df['rel_3y'] / 0.20, -1, 1) * 3
 
+    # --- PENALTIES ---
     s -= df['overlap_score'] * 3
+    s -= np.clip((df['top10_weight'] - 0.30) / 0.30, 0, 1) * 2
+    s -= df['is_thematic'] * 1.5
 
     return s.round(2)
 
-# -----------------------------
-# 🎯 TICKER INPUT (Trading212-style)
-# -----------------------------
+# ============================================================
+# 🎛 UI
+# ============================================================
 
-st.sidebar.header("ETF Universe")
-user_input = st.sidebar.text_area("Enter tickers (comma separated)", "VUSA,CSPX,EQQQ,IUIT,INRG")
+st.sidebar.header("Data Source")
+uploaded_file = st.sidebar.file_uploader("Upload ETF CSV", type=["csv"])
 
-tickers = [t.strip() for t in user_input.split(',')]
+if uploaded_file:
+    df = load_csv(uploaded_file)
+else:
+    st.warning("Upload a clean ETF dataset to begin")
+    st.stop()
 
-# Load + enrich data
+# Enrich
 
-df = load_data(tickers)
-df = add_relative_performance(df)
+df = ensure_relative_cols(df)
 df = calculate_overlap(df)
 
 # Score
 
 df['score'] = score_etf(df)
 
-# -----------------------------
-# 🎛 FILTERS
-# -----------------------------
+# Filters
 
 st.sidebar.header("Filters")
 min_score = st.sidebar.slider("Minimum Score", 0.0, 25.0, 10.0)
+acc_only = st.sidebar.checkbox("Accumulating Only")
 
 filtered_df = df[df['score'] >= min_score]
 
-# -----------------------------
-# 📊 OUTPUT
-# -----------------------------
+if acc_only:
+    filtered_df = filtered_df[filtered_df['is_accumulating'] == 1]
+
+# Output
 
 st.subheader("ETF Rankings")
 st.dataframe(filtered_df.sort_values(by='score', ascending=False), use_container_width=True)
@@ -174,46 +175,48 @@ st.write(filtered_df.sort_values(by='score', ascending=False).head(1))
 st.subheader("Score Distribution")
 st.bar_chart(filtered_df.set_index('ticker')['score'])
 
-# -----------------------------
-# 🧾 METHODOLOGY TEMPLATE
-# -----------------------------
+# ============================================================
+# 📄 TEMPLATE FOR OTHER AIs
+# ============================================================
 
-st.subheader("📄 AI Comparison Methodology Template")
+st.subheader("📄 Cross-AI Methodology Template")
 
 st.code("""
 Objective:
-Rank ETFs based on efficiency, structure, and performance consistency.
+Rank ETFs using a rules-based scoring model focused on cost efficiency, tracking quality, liquidity, and structural robustness.
 
-Inputs:
-- Expense ratio
-- Tracking difference
-- AUM
-- Volume
-- Spread
-- Replication method
-- Dividend structure
-- Relative performance vs benchmark
+Dataset Requirements:
+Provide a table with the following columns:
+- ticker
+- expense_ratio
+- tracking_diff
+- avg_volume
+- spread
+- aum
+- is_physical (1/0)
+- is_accumulating (1/0)
+- issuer
+- benchmark
+- top10_weight (optional)
+- is_thematic (optional)
+- rel_1y (optional)
+- rel_3y (optional)
 
-Scoring Weights:
+Scoring Framework:
 - Cost & Tracking: 40%
 - Liquidity & Size: 25%
-- Structure: 20%
-- Performance: 15%
+- Structure Quality: 20%
+- Performance (relative): 15%
 
 Adjustments:
-- Penalise overlap with existing holdings
-- Penalise thematic ETFs
-- Penalise high concentration (top 10 weight)
+- Penalise overlapping ETFs (same benchmark)
+- Penalise high concentration (top10_weight > 30%)
+- Penalise thematic funds
 
-Output:
-- Score (0–25)
-- Ranked ETF list
-
-Instructions for AI:
-1. Use objective, rules-based scoring
-2. Do NOT overweight recent performance
-3. Prefer low-cost, high-liquidity funds
-4. Highlight any concentration or overlap risks
-5. Return ranked table + explanation
+Instructions:
+1. Do NOT optimise for recent returns
+2. Prefer low-cost, high-liquidity ETFs
+3. Highlight structural risks
+4. Return ranked table with scores
+5. Explain top 3 and worst 3 selections
 """)
-
